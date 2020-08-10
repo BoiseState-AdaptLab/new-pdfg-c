@@ -145,16 +145,14 @@ class PDFGLFuncBuilder {
             currentStmtInfoSet.advanceSchedule();
             currentStmtInfoSet.enterFor(asForStmt, Context);
             processBody(asForStmt->getBody());
-            //currentStmtInfoSet.exitCtrlFlow();
-            currentStmtInfoSet.exitFor();
+            currentStmtInfoSet.exitCtrlFlow();
             return;
         }
         IfStmt* asIfStmt = dyn_cast<IfStmt>(stmt);
         if (asIfStmt) {
             currentStmtInfoSet.enterIf(asIfStmt, Context);
             processBody(asIfStmt->getThen());
-            //currentStmtInfoSet.exitCtrlFlow();
-            currentStmtInfoSet.exitIf();
+            currentStmtInfoSet.exitCtrlFlow();
             return;
         }
 

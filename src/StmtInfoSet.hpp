@@ -14,86 +14,130 @@ using namespace clang;
 
 namespace pdfg_c {
 
-// Represents an if statement as a list of constraints
-// Don't confuse it with clang's IfStmt
-struct IfStmnt {
-    std::vector<std::string> constraints;
-    ASTContext* Context;
-
-    IfStmnt (ASTContext* Context) : Context(Context) {}
-    IfStmnt (ASTContext* Context, IfStmt* stmt) : Context(Context) {
+// Represents a control flow statements with conditions and an
+// iterator if it is a for loop
+struct CtrlFlowStmt {
+    CtrlFlowStmt (ASTContext* Context, IfStmt* stmt,
+                  std::vector<std::shared_ptr<CtrlFlowStmt>> parents = {})
+                  : Context(Context), _hasIter(false) {
         if (BinaryOperator* b = cast<BinaryOperator>(stmt->getCond())) {
-            parseBinOp(b);
+            addConstraint(b);
         }
+        applySubstitutions(parents);
     }
-
-    // Print this struct
-    void print() {
-        for (auto it = constraints.begin(); it != constraints.end(); ++it) {
-            if (it != constraints.begin()) {llvm::outs() << " && ";}
-            llvm::outs() << (*it);
-        }
-        llvm::outs() << "\n";
-    }
-
-    // Parse a binary operation into constraints
-    void parseBinOp(BinaryOperator* b) {
-        // TODO: Handle OR statements (e.g. i >= 5 || i <= -5)
-        // Check if either side of the binary operator is itself a binary operator
-        bool lh = isa<BinaryOperator>(b->getLHS());
-        bool rh = isa<BinaryOperator>(b->getRHS());
-        if (lh && rh) {
-            parseBinOp(cast<BinaryOperator>(b->getLHS()));
-            parseBinOp(cast<BinaryOperator>(b->getRHS()));
-        // If both sides are simple expressions, add as a constraint
-        } else {
-            constraints.push_back(constraintString(b->getLHS(), b->getRHS(),
-                                                   b->getOpcode()));
-       }
-    }
-
-    // Turns two Expr objects and a binary operation code into a constraint string
-    std::string constraintString(Expr* lhs, Expr* rhs, BinaryOperatorKind oper) {
-        std::string output;
-        llvm::raw_string_ostream os(output);
-        os << Utils::exprToString(lhs, Context) << " "
-            << Utils::binaryOperatorKindToString(oper, Context)
-            << " " << Utils::exprToString(rhs, Context);
-        return os.str();
-    }
-};
-
-// Represents a for loop as an iteration variable and a list of constraints
-// Don't confuse it with clang's ForStmt
-struct ForStmnt : public IfStmnt {
-    std::string iter;
-
-    ForStmnt (ASTContext* Context) : IfStmnt(Context) {}
-    ForStmnt (ASTContext* Context, ForStmt* stmt) : IfStmnt(Context) {
+    CtrlFlowStmt (ASTContext* Context, ForStmt* stmt,
+                  std::vector<std::shared_ptr<CtrlFlowStmt>> parents = {})
+                  : Context(Context), _hasIter(true){
         parseFor(stmt);
+        applySubstitutions(parents);
+    }
+
+    // TODO: The constraint needs to be simplified
+    // Substitute iterator variable with expression
+    void applySubstitution(std::string iter, std::string sub, std::string &target) {
+        llvm::outs() << "Replacing " << iter << " With " << sub << " In " << target << "\n";
+        size_t iterLen = iter.size();
+        size_t subLen = sub.size();
+        std::ostringstream result;
+        int idx = target.find(iter);
+        while (idx != std::string::npos && target.size() > 0) {
+            // Make sure the character before is not alphabetic or '_'
+            bool validPrev = idx == 0 || (!isalpha(target[idx - 1])
+                             && target[idx - 1] != '_');
+            // Make sure the character after is not alphanumberic or '_'
+            int idx2 = idx + iter.size();
+            bool validPost = idx2 == target.size() ||
+                             (!isalnum(target[idx2]) &&
+                              target[idx2] != '_');
+            // Add with substitution
+            if (validPrev && validPost) {
+                result << target.substr(0, idx) << sub;
+            // Add without substitution
+            } else {
+                result << target.substr(0, idx2);
+            }
+            target = target.substr(idx2);
+            // Find next instance
+            idx = target.find(iter);
+        }
+        result << target;
+        target = result.str();
+    }
+
+    // Substitute iter variable to ensure single increments (+=2 -> ++)
+    void applySubstitutions(std::vector<std::shared_ptr<CtrlFlowStmt>> parents) {
+        std::string constrs = getConstraints();
+        for (auto it = parents.begin(); it != parents.end(); ++it) {
+            if ((*it)->hasSubstitution()) {
+                // Get iteration variable and substitution expression
+                std::string iter = (*it)->getIter();
+                std::string sub = (*it)->getSubstitution();
+                applySubstitution(iter, sub, constrs);
+            }
+        }
+        _constraints.str(constrs);
     }
 
     // Print this struct
     void print() {
-        llvm::outs() << "[" << iter << "]: ";
-        IfStmnt::print();
+        if (_hasIter) { llvm::outs() << "[" << _iter << "]: "; }
+        llvm::outs() << getConstraints() << "\n";
     }
 
+    // Returns constraints as a string
+    std::string getConstraints() {return _constraints.str();}
+
+    // Returns increment amount for this statment
+    int getIncr() {return _incr;}
+
+    // Returns iterator variable for this statement
+    std::string getIter() {return _iter;}
+
+    // Returns substition if any
+    std::string getSubstitution() {return _sub;}
+
+    // Returns if this is a for loop or not
+    bool isFor() {return _hasIter;}
+
+    // Returns if this statement performs a substitution
+    bool hasSubstitution() {return isFor() && _incr != 1;}
+
+  private:
+    ASTContext* Context;
+    std::ostringstream _constraints;
+    // Iterator variable if applicable
+    std::string _iter;
+    // Increment value for iter variable
+    int _incr;
+    // If the increment value != 1, we will need a substitution
+    std::string _sub;
+    // has iterator
+    bool _hasIter;
+ 
+    void addConstraint(BinaryOperator* b) {
+        addConstraint(Utils::exprToString(b, Context).str());
+    }
+
+    void addConstraint(std::string stmt) {
+        if (getConstraints() != "") {
+            _constraints << " && ";
+        }
+        _constraints << stmt;
+    }
+   
     // Parse ForStmt
     void parseFor(ForStmt* stmt) {
         // Set to true if we can parse the increment statement
         bool canParse = false;
         // Stores whether the loop is incrementing or decrementing
-        bool increment;
+        _incr = 1;
         // Get increment expression
         Expr* incExpr = stmt->getInc();
         if (isa<UnaryOperator>(incExpr)){
             UnaryOperator* inc = cast<UnaryOperator>(incExpr);
             if (inc->isIncrementDecrementOp()) {
-                // Get the increment operator
-                UnaryOperatorKind oper = inc->getOpcode();
                 // Check if it is a positive operator (++i or i++)
-                increment = (oper == UO_PreInc || oper == UO_PostInc);
+                _incr = (inc->isIncrementOp() ? 1 : -1);
                 canParse = true;
             }
         } else if (isa<BinaryOperator>(incExpr)) {
@@ -102,26 +146,23 @@ struct ForStmnt : public IfStmnt {
             BinaryOperatorKind oper = inc->getOpcode();
             // Operator is '+=' or '-='
             if (oper == BO_AddAssign || oper == BO_SubAssign) {
-                //TODO: What do we do with the integer literal increment?
                 // Saves increment value
                 Expr::EvalResult result;
                 // Rhs must be an integer != 0
                 if (inc->getRHS()->EvaluateAsInt(result, *Context)) {
-                    llvm::APSInt incVal = result.Val.getInt();
-                    if (incVal != 0) {
-                        // Check if it is a positive operator (+=)                  
-                        increment = (oper == BO_AddAssign) == incVal.isNonNegative();
-                        canParse = true;
-                    }
+                    _incr = result.Val.getInt().getExtValue();
+                    // Check if it is a negative operator (-=)
+                    if (oper == BO_SubAssign) {_incr *= -1;}
+                    canParse = true;
                 }
             // Operator is '='
             } else if (oper == BO_Assign && isa<BinaryOperator>(inc->getRHS())) {
-                // This is the rhs of the increment statement
+                // This is the rhs of the incrrement statement
                 // (e.g. with i = i + 1, this is i + 1)
                 BinaryOperator* binOp = cast<BinaryOperator>(inc->getRHS());
-                // Get the binary operation that conrols loop incrementing
+                // Get the binary operation that conrols loop incrrementing
                 BinaryOperatorKind oper = binOp->getOpcode();
-                // Get variable being incremented
+                // Get variable being incrremented
                 std::string iterStr = Utils::exprToString(inc->getLHS(),
                                                           Context).str();
                 // Must be addition or subtraction
@@ -131,7 +172,7 @@ struct ForStmnt : public IfStmnt {
                     Expr* rhs = binOp->getRHS();
                     std::string lhStr = Utils::exprToString(lhs, Context).str();
                     std::string rhStr = Utils::exprToString(rhs, Context).str();
-                    // Saves increment value
+                    // Saves incrrement value
                     Expr::EvalResult result;
                     // Left side is iter var, right side is integer (e.g. i + 1)
                     if ((lhStr.compare(iterStr) == 0 &&
@@ -141,18 +182,16 @@ struct ForStmnt : public IfStmnt {
                         (rhStr.compare(iterStr) == 0 && oper != BO_Sub &&
                          lhs->EvaluateAsInt(result, *Context))){
 
-                        llvm::APSInt incVal = result.Val.getInt();
-                        if (incVal != 0) {
-                            // Calculate if our increment is positive or negative
-                            increment = (oper == BO_Add) == incVal.isNonNegative();
-                            canParse = true;
-                        }
+                        _incr = result.Val.getInt().getExtValue();
+                        // Check if it is a negative operator (-=)
+                        if (oper == BO_SubAssign) {_incr *= -1;}
+                        canParse = true;
                     }
                 }
             }
         }
         if (!canParse) {
-            llvm::outs() << "Cannot parse loop increment statement ";
+            llvm::outs() << "Cannot parse loop incrementing statement ";
             incExpr->dumpPretty(*Context);
             llvm::outs() << "\n";
             return;
@@ -161,40 +200,62 @@ struct ForStmnt : public IfStmnt {
         // Parse initializer expression
         Stmt* initStmt = stmt->getInit();
         if (isa<BinaryOperator>(initStmt)) {
-            parseInit(cast<BinaryOperator>(initStmt), increment);
+            parseInit(cast<BinaryOperator>(initStmt));
         } else if (isa<DeclStmt>(initStmt)) {
-            parseInit(cast<DeclStmt>(initStmt), increment);
+            parseInit(cast<DeclStmt>(initStmt));
         } else {
             return;
         }
  
         // Parse conditions
-        if (isa<BinaryOperator>(stmt->getCond())) {            
-            parseBinOp(cast<BinaryOperator>(stmt->getCond()));
-        }
+        if (isa<BinaryOperator>(stmt->getCond())) {
+            // Get the binary operator
+            BinaryOperator* bo = cast<BinaryOperator>(stmt->getCond());
+            // If there is a subsitution, apply that before adding
+            if (hasSubstitution()) {
+                std::string cond = Utils::exprToString(bo, Context).str();
+                applySubstitution(_iter, _sub, cond);
+                addConstraint(cond);
+            } else {
+                addConstraint(bo);
+            }
+       }
     }
 
-  private:
+    // Create constraint from for loop initializer and incrementer statements
+    void createInitConstraint(std::string initVal) {
+        // Write constraint
+        std::string output;
+        llvm::raw_string_ostream os(output);
+        os << _iter << " >= ";
+        // If incr != 1, perform this substitution: iter = incr*iter2 + initVal for 0 <= iter2
+        if (_incr != 1) {
+            os << "0";
+            std::ostringstream oss;
+            // Simplify -1*iter to -iter
+            if (_incr == -1) {oss << "(-";}
+            else {oss << "(" << _incr << "*";}
+            oss << _iter << " + " << initVal << ")";
+            _sub = oss.str();
+        } else {os << initVal;}
+        addConstraint(os.str());
+    }
+
     // Parse the init statement if it is a binary operator
-    void parseInit(BinaryOperator* init, bool increment) {
-        iter = Utils::exprToString(init->getLHS(), Context).str();
-        // If we are incrementing, then iter >= lb otherwise iter <= ub
-        BinaryOperatorKind oper = (increment ? BO_GE : BO_LE);
-        constraints.push_back(constraintString(init->getLHS(), init->getRHS(), oper));
+    void parseInit(BinaryOperator* init) {
+        // Get iterator
+        _iter = Utils::exprToString(init->getLHS(), Context).str();
+        // Create constraint
+        createInitConstraint(Utils::exprToString(init->getRHS(), Context).str());
     }
 
     // Parse the init statement if it is a declaration
-    void parseInit(DeclStmt* init, bool increment) {
+    void parseInit(DeclStmt* init) {
         if (VarDecl* initVar = cast<VarDecl>(init->getSingleDecl())) {
-            iter = initVar->getNameAsString();
-            // If we are incrementing, then iter >= lb otherwise iter <= ub
-            BinaryOperatorKind oper = (increment ? BO_GE : BO_LE);
-            std::string output;
-            llvm::raw_string_ostream os(output);
-            os << iter << " "
-               << Utils::binaryOperatorKindToString(oper, Context)
-               << " " << Utils::exprToString(initVar->getInit(), Context);
-            constraints.push_back(os.str());
+            // Get iterator
+            _iter = initVar->getNameAsString();
+            // Create constraint
+            createInitConstraint(Utils::exprToString(initVar->getInit(), Context).str());
         }
     }
 };
@@ -214,46 +275,30 @@ struct ScheduleVal {
 struct StmtInfoSet {
     StmtInfoSet() {}
     StmtInfoSet(StmtInfoSet* other) {
-        ifStmts = other->ifStmts;
-        forStmts = other->forStmts;
+        stmts = other->stmts;
         schedule = other->schedule;
     }
 
-    std::string getIterSpaceString() {
+    std::string getIterSpaceString(bool ampersand=false) {
         std::string output, output2, output3;
         llvm::raw_string_ostream os(output);
-        llvm::raw_string_ostream iters(output2), constrs(output3);
+        llvm::raw_string_ostream iters(output2), conds(output3);
         iters << "[";
-        // Write all for loops
-        for (auto it = forStmts.begin(); it != forStmts.end(); ++it) {
-            if (it != forStmts.begin()) {
-                iters << ",";
-                constrs << " && ";
+        // Write all statements, start at innermost scope (end of vector)
+        for (auto it = stmts.begin(); it != stmts.end(); ++it) {
+            bool isFor = (*it)->isFor();
+            if (it != stmts.begin()) {
+                if (isFor) {iters << ",";}
+                conds << " && ";
             }
-            iters << (*it)->iter;
-            std::vector<std::string>* vec = &((*it)->constraints);
-            for (auto str = vec->begin(); str != vec->end(); ++str) {
-                if (str != vec->begin()) {
-                    constrs << " && ";
-                }
-                constrs << (*str);
-            }
+
+            // Write the conditions            
+            conds << (*it)->getConstraints();
+            // Write the iterator
+            if (isFor) {iters << (*it)->getIter();}
         }
         iters << "]";
-        // Write all if statements
-        for (auto it = ifStmts.begin(); it != ifStmts.end(); ++it) {
-            if (it != ifStmts.begin()) {
-                constrs << " && ";
-            }
-            std::vector<std::string>* vec = &((*it)->constraints);
-            for (auto str = vec->begin(); str != vec->end(); ++str) {
-                if (str != vec->begin()) {
-                    constrs << " && ";
-                }   
-                constrs << (*str);
-            }
-        }   
-        os << "{" << iters.str() << ": " << constrs.str() << "}";
+        os << "{" << iters.str() << ": " << conds.str() << "}";
         return os.str();
     }
 
@@ -262,11 +307,13 @@ struct StmtInfoSet {
         llvm::raw_string_ostream os(output);
         os << "{[";
         // Write all iterator variables
-        for (auto it = forStmts.begin(); it != forStmts.end(); ++it) {
-            if (it != forStmts.begin()) {
+        for (auto it = stmts.begin(); it != stmts.end(); ++it) {
+            if (!(*it)->isFor()) {continue;}
+
+            if (it != stmts.begin()) {
                 os << ",";
             }
-            os << (*it)->iter;
+            os << (*it)->getIter();
         }
         os << "]->[";
         // Write schedule
@@ -310,31 +357,29 @@ struct StmtInfoSet {
 
     void enterFor(ForStmt* forStmt, ASTContext* Context) {
         // Add for loop
-        auto stmt = std::make_shared<ForStmnt>(Context, forStmt);
-        forStmts.push_back(stmt);
+        auto stmt = std::make_shared<CtrlFlowStmt>(Context, forStmt, stmts);
+        stmts.push_back(stmt);
         // Update schedule
-        schedule.push_back(std::make_shared<ScheduleVal>(stmt->iter));
-    }
-
-    void exitFor() {
-        forStmts.pop_back();
-        // Remove place in for loop from schedule
-        schedule.pop_back();
-        // Remove for loop from schedule
-        schedule.pop_back();
+        schedule.push_back(std::make_shared<ScheduleVal>(stmt->getIter()));
     }
 
     void enterIf(IfStmt* ifStmt, ASTContext* Context) {
-        ifStmts.push_back(std::make_shared<IfStmnt>(Context, ifStmt));
+        stmts.push_back(std::make_shared<CtrlFlowStmt>(Context, ifStmt, stmts));
     }
 
-    void exitIf() { ifStmts.pop_back(); }
+    void exitCtrlFlow () {
+        if (stmts.back()->isFor()) {
+            // Remove place in for loop from schedule
+            schedule.pop_back();
+            // Remove for loop from schedule
+            schedule.pop_back();
+        }
+        stmts.pop_back();
+    }
 
    private:
-    // List of if statements
-    std::vector<std::shared_ptr<IfStmnt>> ifStmts;
-    // List of for loops
-    std::vector<std::shared_ptr<ForStmnt>> forStmts;
+    // List of control flow statements
+    std::vector<std::shared_ptr<CtrlFlowStmt>> stmts;
     // execution schedule, which begins at 0
     std::vector<std::shared_ptr<ScheduleVal>> schedule; 
 };
